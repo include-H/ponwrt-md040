@@ -1,0 +1,10 @@
+# Feed revisions used for the 2026-11-17 md040 build
+
+pon_drivers     47ad31349807099cf84c8ca9fb1a3f10120ef9ee
+pon_userspace   a903fcc80f4b89f9b9e59a02d3ba1fc5550819a5
+
+# Target base
+ponwrt          f6977f2 (upstream master at branch creation)
+
+# Kernel
+linux           6.18.60
