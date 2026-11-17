@@ -1,0 +1,49 @@
+#!/bin/sh /etc/rc.common
+# Physical-device flowtable for AN7581 PPE offload (MD040 routing mode).
+#
+# fw4 builds its flowtable from logical devices (pppoe-wan, pon0.41, br-lan),
+# which never reach airoha_eth's ndo_setup_tc.  A flowtable on the physical
+# devices does reach it, so the PPE can bind routed/NAT flows.
+#
+# Only the routed path is covered here:
+#   lan1 (2.5G) <-> pon0 (XG-PON)
+# IPTV lan2-4 live in br-iptv and are intentionally excluded.
+
+START=99
+USE_PROCD=1
+
+start_service() {
+	local wan lan
+
+	wan=$(uci -q get network.wan.device)
+	[ -n "$wan" ] || wan="pon0"
+	# PPPoE is carried over pon0 or pon0.<vlan>; PPE setup needs the
+	# physical PON netdev, not the VLAN/PPP logical device.
+	wan=${wan%%.*}
+
+	lan=$(uci -q get network.lan.device)
+	if [ -z "$lan" ] || [ "$lan" = "br-lan" ]; then
+		lan=$(uci -q get network.@device[0].ports | awk '{print $1}')
+	fi
+	[ -n "$lan" ] || lan="lan1"
+
+	[ -e "/sys/class/net/$wan" ] || {
+		logger -t ppeflow "$wan is not present, skipping"
+		return 0
+	}
+	[ -e "/sys/class/net/$lan" ] || {
+		logger -t ppeflow "$lan is not present, skipping"
+		return 0
+	}
+
+	nft delete table inet ppe 2>/dev/null
+	nft add table inet ppe
+	nft add flowtable inet ppe ft { hook ingress priority 0\; devices = { $lan, $wan }\; flags offload\; }
+	nft add chain inet ppe c { type filter hook forward priority 10\; policy accept\; }
+	nft add rule inet ppe c meta l4proto { tcp, udp } flow add @ft
+	logger -t ppeflow "flowtable on $lan/$wan"
+}
+
+stop_service() {
+	nft delete table inet ppe 2>/dev/null
+}

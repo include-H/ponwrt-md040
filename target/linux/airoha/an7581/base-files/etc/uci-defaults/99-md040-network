@@ -1,0 +1,49 @@
+#!/bin/sh
+# MD040 default network split:
+#   br-lan  = lan1 (2.5G) only
+#   br-iptv = lan2 lan3 lan4
+#   iptv    = L2 bridge, no protocol
+#
+# IPTV VLAN subinterfaces (e.g. pon0.43) are intentionally not hardcoded;
+# add them to br-iptv according to the local ISP configuration.
+
+[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = "nokia,xg-040g-md-ubi" ] || exit 0
+
+lan_bridge=$(uci -q get network.lan.device)
+[ -n "$lan_bridge" ] || lan_bridge="br-lan"
+
+idx=0
+while uci -q get "network.@device[$idx]" >/dev/null 2>&1; do
+	if [ "$(uci -q get "network.@device[$idx].name")" = "$lan_bridge" ]; then
+		uci -q delete "network.@device[$idx].ports"
+		uci -q add_list "network.@device[$idx].ports=lan1"
+		break
+	fi
+	idx=$((idx + 1))
+done
+
+# IPTV bridge
+uci -q set network.br_iptv='device'
+uci -q set network.br_iptv.name='br-iptv'
+uci -q set network.br_iptv.type='bridge'
+uci -q set network.br_iptv.igmp_snooping='1'
+uci -q delete network.br_iptv.ports
+uci -q add_list network.br_iptv.ports='lan2'
+uci -q add_list network.br_iptv.ports='lan3'
+uci -q add_list network.br_iptv.ports='lan4'
+
+# IPTV interface (L2 bridge, no IP protocol)
+uci -q set network.iptv='interface'
+uci -q set network.iptv.proto='none'
+uci -q set network.iptv.device='br-iptv'
+
+uci commit network
+
+# Make sure the physical-device PPE flowtable starts on the next boot.
+[ -x /etc/init.d/ppeflow ] && /etc/init.d/ppeflow enable
+
+# The full image pulls bridger in to satisfy dae's BPF toolchain; keep it
+# installed but disabled unless the user explicitly wants bridge BPF offload.
+[ -x /etc/init.d/bridger ] && /etc/init.d/bridger disable
+
+exit 0

@@ -1,0 +1,71 @@
+From: md040 <md040@localhost>
+Subject: [PATCH] net: airoha: fix AN7581 IPv6 PPPoE flow offload fallthrough
+
+Routed IPv6 packets that miss the software FOE flow list currently fall
+through into l2_lookup and can be committed as an L2 subflow.  That
+clobbers the PPPoE session ID in src_mac_hi and redirects the flow to
+the NPU stats port, which stalls AN7581 IPv6 PPPoE traffic.
+
+Only true bridge packets should fall through to l2_lookup.  Preserve the
+PPPoE session ID when committing an IPv6 subflow, and skip the unverified
+NPU flow-stats update/readout for AN7581 IPv6 route entries.  The PPPoE
+MTU accounting is handled separately by 992-md040-pppoe-mtu.patch.
+
+---
+diff -ruN a/drivers/net/ethernet/airoha/airoha_ppe.c b/drivers/net/ethernet/airoha/airoha_ppe.c
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c	2026-11-17 09:44:56.481313514 +0800
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c	2026-11-17 09:44:56.504336529 +0800
+@@ -770,8 +770,10 @@
+ 	int ppe_num_stats_entries;
+ 	u8 nbq;
+ 
+-	/* No verified NPU counter layout for native AN7581 L2B entries. */
+-	if (airoha_is_7581(ppe->eth) && type == PPE_PKT_TYPE_BRIDGE)
++	/* No verified NPU counter layout for native AN7581 L2B and IPv6 entries. */
++	if (airoha_is_7581(ppe->eth) &&
++	    (type == PPE_PKT_TYPE_BRIDGE ||
++	     type >= PPE_PKT_TYPE_IPV6_ROUTE_3T))
+ 		return;
+ 
+ 	/* Flow accounting diverts every accelerated flow to CDM3 for the
+@@ -1070,7 +1072,9 @@
+ 		 * source mac address
+ 		 */
+ 		hwe.ipv6.l2.src_mac_hi = FIELD_PREP(AIROHA_FOE_MAC_SMAC_ID,
+-						    0xf);
++						    0xf) |
++					 (hwe.ipv6.l2.src_mac_hi &
++					  AIROHA_FOE_MAC_PPPOE_ID);
+ 	} else {
+ 		memcpy(&hwe.bridge.l2, &e->data.bridge.l2,
+ 		       sizeof(hwe.bridge.l2));
+@@ -1136,6 +1140,10 @@
+ 	if (commit_done)
+ 		goto unlock;
+ 
++	if (FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, hwe->ib1) !=
++	    PPE_PKT_TYPE_BRIDGE)
++		goto unlock;
++
+ l2_lookup:
+ 	airoha_ppe_foe_set_bridge_addrs(&br, eth_hdr(skb));
+ 	e = rhashtable_lookup_fast(&ppe->l2_flows, &br,
+@@ -1525,10 +1533,14 @@
+ 	u32 index;
+ 
+ 	hwe = ppe->foe + hash * sizeof(*hwe);
+-	if (airoha_is_7581(eth) &&
+-	    FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, READ_ONCE(hwe->ib1)) ==
+-	    PPE_PKT_TYPE_BRIDGE)
+-		return;
++	if (airoha_is_7581(eth)) {
++		u32 type = FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE,
++				     READ_ONCE(hwe->ib1));
++
++		if (type == PPE_PKT_TYPE_BRIDGE ||
++		    type >= PPE_PKT_TYPE_IPV6_ROUTE_3T)
++			return;
++	}
+ 
+ 	ppe_num_stats_entries = airoha_ppe_get_total_num_stats_entries(ppe);
+ 	if (ppe_num_stats_entries < 0)
